@@ -32,9 +32,9 @@ public:
   double       length() const;
   unsigned int numPoints() const;
   void         projectEndpoints();
+  std::vector<unsigned int> indices_;
 
 private:
-  std::vector<unsigned int> indices_;
   // Data structures
   CachedData c_data_;
   RangeData r_data_;

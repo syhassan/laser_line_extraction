@@ -46,6 +46,13 @@ private:
   std::vector<unsigned int> filtered_indices_;
   // Line data
   std::vector<Line> lines_;
+
+  //
+  //outlier indices
+  std::vector<unsigned int>  outlier_indices_;
+  int outlier_number_;
+  //
+  
   // Methods
   double chiSquared(const Eigen::Vector2d&, const Eigen::Matrix2d&,
                     const Eigen::Matrix2d&);
@@ -55,6 +62,13 @@ private:
   void   filterLines();
   void   mergeLines();
   void   split(const std::vector<unsigned int>&);
+  
+  //
+  void   checkOutliers();
+  double pointToLinePerpendicularDist(int line_index, int outlier_index);
+  double pointToEndOfLineDistance(int line_index, int outlier_index);
+  void   fitIntoLine(int line_index, int outlier_index);
+  //
 };
 
 } // namespace line_extraction

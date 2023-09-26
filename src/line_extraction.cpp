@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <Eigen/Dense>
 #include <iostream>
+#include <ros/ros.h>
 
 namespace line_extraction
 {
@@ -28,17 +29,20 @@ void LineExtraction::extractLines(std::vector<Line>& lines)
 
   // Filter indices
   filterCloseAndFarPoints();
+  outlier_indices_.clear();
   filterOutlierPoints();
+  outlier_number_ = outlier_indices_.size();
 
-  // Return no lines if not enough points left
+  // // Return no lines if not enough points left
   if (filtered_indices_.size() <= std::max(params_.min_line_points, static_cast<unsigned int>(3)))
   {
     return;
   }
 
-  // Split indices into lines and filter out short and sparse lines
+  // // Split indices into lines and filter out short and sparse lines
   split(filtered_indices_);
   filterLines();
+  // checkOutliers();
 
   // Fit each line using least squares and merge colinear lines
   for (std::vector<Line>::iterator it = lines_.begin(); it != lines_.end(); ++it)
@@ -217,6 +221,13 @@ void LineExtraction::filterOutlierPoints()
       line.endpointFit();
       if (line.distToPoint(p_i) > params_.min_split_dist)
       {
+        // 
+        if (r_data_.ranges[p_i] < 30)
+        {
+          // ROS_WARN_STREAM(r_data_.ranges[p_i]);
+          outlier_indices_.push_back(p_i);
+        }
+        //
         continue; // point is an outlier
       }
     }
@@ -238,6 +249,13 @@ void LineExtraction::filterLines()
     if (cit->length() >= params_.min_line_length && cit->numPoints() >= params_.min_line_points)
     {
       output.push_back(*cit);
+    }
+    else
+    {
+      for (int i=0; i < cit->indices_.size(); i++)
+      {
+        outlier_indices_.push_back(cit->indices_[i]);
+      }
     }
   }
   lines_ = output;
@@ -312,7 +330,7 @@ void LineExtraction::split(const std::vector<unsigned int>& indices)
   double gap_max = 0;
   double dist, gap;
   int i_max, i_gap;
-
+  
   // Find the farthest point and largest gap
   for (std::size_t i = 1; i < indices.size() - 1; ++i)
   {
@@ -358,6 +376,113 @@ void LineExtraction::split(const std::vector<unsigned int>& indices)
     split(second_split);
   }
 
+}
+
+void LineExtraction::checkOutliers()
+{
+  std::vector<double> kickOutList;
+  for(int i=0; i < lines_.size(); i++)
+  {
+     // Go through all lines to see if they can be extended
+    if(outlier_indices_.size() == 0)
+    {
+      continue;
+    }
+    for(int j=0;  j < outlier_indices_.size(); j++)
+    {
+      // For each line check with all outliers to see if they are within range
+      double pointToLineDist = pointToLinePerpendicularDist(i, outlier_indices_[j]);
+      double pointToEndDist = pointToEndOfLineDistance(i, outlier_indices_[j]);
+
+      if (pointToLineDist < 0.05 && 
+          pointToEndDist < 0.2)
+      {
+        // If within tolerances, see if it replaces start or end point
+        fitIntoLine(i, outlier_indices_[j]);
+        kickOutList.push_back(j);
+      }
+    }
+    for (int k = kickOutList.size() -1; k >= 0; k--)
+    {
+      if(kickOutList[k] > outlier_indices_.size()-1)
+      {
+        continue;
+      }
+      outlier_indices_.erase(outlier_indices_.begin()+kickOutList[k]);
+    }
+  }
+  
+  if (outlier_number_ != outlier_indices_.size())
+  {
+    outlier_number_ = outlier_indices_.size();
+    ROS_WARN_STREAM("iteration");
+    checkOutliers();
+  }
+}
+
+double LineExtraction::pointToLinePerpendicularDist(int line_index, int outlier_index)
+{
+  double a = lines_[line_index].getStart()[1] - lines_[line_index].getEnd()[1];
+  double b = lines_[line_index].getEnd()[0] - lines_[line_index].getStart()[0];
+  double c = lines_[line_index].getStart()[0]*lines_[line_index].getEnd()[1]-lines_[line_index].getEnd()[0]*lines_[line_index].getStart()[1];
+
+  return ( std::abs(a*r_data_.xs[outlier_index] + b*r_data_.ys[outlier_index] + c) / std::sqrt(std::pow(a, 2) + std::pow(b, 2)) );
+}
+
+double LineExtraction::pointToEndOfLineDistance(int line_index, int outlier_index)
+{
+  double distToStart = std::sqrt(std::pow(lines_[line_index].getStart()[1] - r_data_.ys[outlier_index], 2) 
+     + std::pow(lines_[line_index].getStart()[0] - r_data_.xs[outlier_index], 2));
+  
+  double distToEnd = std::sqrt(std::pow(lines_[line_index].getEnd()[1] - r_data_.ys[outlier_index], 2) 
+     + std::pow(lines_[line_index].getEnd()[0] - r_data_.xs[outlier_index], 2));
+
+  return distToStart > distToEnd ? distToEnd : distToStart;
+}
+
+void LineExtraction::fitIntoLine(int line_index, int outlier_index)
+{
+  std::vector<double> lineMidpoint (2);
+  lineMidpoint[0] = (lines_[line_index].getStart()[0] + lines_[line_index].getEnd()[0]) / 2;
+  lineMidpoint[1] = (lines_[line_index].getStart()[1] + lines_[line_index].getEnd()[1]) / 2;
+  
+  double midToStartDist = std::sqrt(std::pow(lines_[line_index].getStart()[1] - lineMidpoint[1], 2) 
+                          + std::pow(lines_[line_index].getStart()[0] - lineMidpoint[0], 2));
+  
+  double midToEndDist   = std::sqrt(std::pow(lines_[line_index].getEnd()[1] - lineMidpoint[1], 2) 
+                          + std::pow(lines_[line_index].getEnd()[0] - lineMidpoint[0], 2));
+
+  double outlierToStartDist = std::sqrt(std::pow(lines_[line_index].getStart()[1] - r_data_.ys[outlier_index], 2) 
+                              + std::pow(lines_[line_index].getStart()[0] - r_data_.xs[outlier_index], 2));
+
+  double outlierToEndDist   = std::sqrt(std::pow(lines_[line_index].getEnd()[1] - r_data_.ys[outlier_index], 2) 
+                              + std::pow(lines_[line_index].getEnd()[0] - r_data_.xs[outlier_index], 2));
+  
+  double outlierToMidDist = std::sqrt(std::pow(r_data_.ys[outlier_index] - lineMidpoint[1], 2) 
+                          + std::pow(r_data_.xs[outlier_index] - lineMidpoint[0], 2));
+
+  if (outlierToStartDist < outlierToEndDist)
+  {
+    if(outlierToMidDist > midToStartDist)
+    {
+      lines_[line_index].indices_.insert(lines_[line_index].indices_.begin(), outlier_index);
+      ROS_WARN_STREAM("start point" << lines_[line_index].getStart()[0] << " " << lines_[line_index].getStart()[1]);
+      lines_[line_index].endpointFit();
+      ROS_WARN_STREAM("start point" << lines_[line_index].getStart()[0] << " " << lines_[line_index].getStart()[1]);
+      ROS_WARN_STREAM("changed start" << lines_[line_index].indices_.size() << " " << line_index);
+    }
+  }
+  else
+  {
+    if(outlierToMidDist > midToEndDist)
+    {
+      lines_[line_index].indices_.push_back(outlier_index);
+      ROS_WARN_STREAM("end point" << lines_[line_index].getEnd()[0] << " " << lines_[line_index].getEnd()[1]);
+      lines_[line_index].endpointFit();
+      ROS_WARN_STREAM("end point" << lines_[line_index].getEnd()[0] << " " << lines_[line_index].getEnd()[1]);
+      ROS_WARN_STREAM("changed end" << lines_[line_index].indices_.size() << " " << line_index);
+    }
+  }
 }
 
 } // namespace line_extraction
